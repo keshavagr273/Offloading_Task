@@ -1,5 +1,4 @@
 import cv2
-import psutil
 import numpy as np
 from face_detector import detect_faces
 from rl_agent import HybridRLAgent
@@ -7,6 +6,7 @@ from fog_node import process_on_fog
 from utils import draw_boxes
 from environment import VideoSurveillanceEnv
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
 # Initialize environment and agent
 camera = None
@@ -14,7 +14,10 @@ fog_node_capacity = 5
 network_bandwidth = 5
 
 env = VideoSurveillanceEnv(camera, fog_node_capacity, network_bandwidth)
-agent = HybridRLAgent(n_states=4, n_actions=2)
+state_bins = 10  # Discretize states into 10 bins for each parameter (example)
+n_actions = 2  # Example: 2 actions (local or offload)
+
+agent = HybridRLAgent(state_bins=state_bins, n_actions=n_actions)  # Corrected instantiation
 
 # Counters for actions
 local_count = 0
@@ -22,6 +25,56 @@ offload_count = 0
 
 # List to store rewards for plotting
 rewards = []
+cpu_usages = []
+network_conditions = []
+task_queue_lengths = []
+q_table_data = []
+
+# Real-time plotting setup
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+def update_plots(frame):
+    axes[0, 0].clear()
+    axes[0, 1].clear()
+    axes[1, 0].clear()
+    axes[1, 1].clear()
+
+    # Plot CPU usage
+    axes[0, 0].plot(cpu_usages, label="CPU Usage", color='r')
+    axes[0, 0].set_title("CPU Usage")
+    axes[0, 0].set_xlabel("Decision Steps")
+    axes[0, 0].set_ylabel("Usage (%)")
+    axes[0, 0].legend()
+
+    # Plot network condition
+    axes[0, 1].plot(network_conditions, label="Network Condition", color='g')
+    axes[0, 1].set_title("Network Condition")
+    axes[0, 1].set_xlabel("Decision Steps")
+    axes[0, 1].set_ylabel("Condition (0-2)")
+    axes[0, 1].legend()
+
+    # Plot task queue length
+    axes[1, 0].plot(task_queue_lengths, label="Task Queue Length", color='b')
+    axes[1, 0].set_title("Task Queue Length")
+    axes[1, 0].set_xlabel("Decision Steps")
+    axes[1, 0].set_ylabel("Queue Length")
+    axes[1, 0].legend()
+
+    # Plot the Q-table (top 10 states and their action values)
+    q_table_values = list(agent.get_q_table().values())[:10]
+    if q_table_values:
+        q_table_matrix = np.array(q_table_values)
+        axes[1, 1].imshow(q_table_matrix, aspect='auto', cmap='coolwarm')
+        axes[1, 1].set_title("Top 10 Q-Table States")
+        axes[1, 1].set_xlabel("Actions")
+        axes[1, 1].set_ylabel("States")
+    axes[1, 1].set_xticks([0, 1])
+    axes[1, 1].set_xticklabels(["Action 0", "Action 1"])
+
+    plt.tight_layout()
+
+# Initialize animation
+ani = animation.FuncAnimation(fig, update_plots, interval=1000)
 
 def start_video_stream():
     global local_count, offload_count
@@ -39,9 +92,16 @@ def start_video_stream():
         if len(faces) == 0:
             print("😶 No face detected — skipping decision.")
         else:
-            cpu_usage, network_condition = env.get_state()
-            state = cpu_usage
+            # Get environment state
+            cpu_usage, network_condition, task_queue_length, energy_level, task_size, computational_demand, delay_constraint, historical_reward, fog_load = env.get_state()
+            state = (cpu_usage, network_condition, task_queue_length, energy_level, task_size, computational_demand, delay_constraint, historical_reward, fog_load)
 
+            # Update tracking data for dynamic plots
+            cpu_usages.append(cpu_usage)
+            network_conditions.append(network_condition)
+            task_queue_lengths.append(task_queue_length)
+
+            # Agent chooses action
             action = agent.choose_action(state)
 
             if action == 1:
@@ -53,8 +113,9 @@ def start_video_stream():
                 print("😃 Human detected.")
                 local_count += 1
 
+            # Get new state after taking action
             new_state, reward, _ = env.step(action)
-            agent.learn(state, action, reward, new_state[0])
+            agent.learn(state, action, reward, new_state)
 
             rewards.append(reward)
 
@@ -68,32 +129,11 @@ def start_video_stream():
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-    agent.save()
+    agent.save()  # Save agent's learned Q-table
     cap.release()
     cv2.destroyAllWindows()
 
-    # Plotting rewards automatically
-    plot_rewards(rewards)
-
-def plot_rewards(rewards):
-    # Create moving average
-    window = 50
-    moving_avg = np.convolve(rewards, np.ones(window)/window, mode='valid')
-
-    plt.figure(figsize=(12, 6))
-    plt.plot(rewards, label='Reward per step', color='lightblue')
-    plt.plot(range(window-1, len(rewards)), moving_avg, label=f'Moving Average (window={window})', color='blue')
-    plt.xlabel('Decision Steps')
-    plt.ylabel('Reward')
-    plt.title('Hybrid RL Agent Learning Curve')
-    plt.legend()
-    plt.grid(True)
-
-    # Save the plot automatically
-    plt.savefig('reward_plot.png')
-    print("✅ Reward plot saved as 'reward_plot.png' successfully.")
-
-    # Also show the plot
+    # Show dynamic plot of rewards and Q-table
     plt.show()
 
 if __name__ == "__main__":
